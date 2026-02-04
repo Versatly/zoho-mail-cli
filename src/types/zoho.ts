@@ -44,11 +44,11 @@ export interface ZohoEmail {
   fromAddress: string;
   toAddress: string;
   ccAddress?: string;
-  receivedTime: number;
-  sentDateInGMT: number;
+  receivedTime: number | string;
+  sentDateInGMT: number | string;
   status: string;
   status2: string;
-  hasAttachment: boolean;
+  hasAttachment: boolean | string;
   flagid: string;
   summary: string;
   priority?: string;

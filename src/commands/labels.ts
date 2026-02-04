@@ -1,9 +1,9 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { getConfig } from '../lib/config.js';
+import { getConfig, setConfig } from '../lib/config.js';
 import { checkZohoConnection } from '../lib/auth.js';
-import { getLabels, createLabel, deleteLabel } from '../lib/client.js';
+import { getLabels, createLabel, deleteLabel, getAccountId } from '../lib/client.js';
 import { formatLabels, success, error, warn } from '../lib/output.js';
 
 function requireAuth(): void {
@@ -15,14 +15,21 @@ function requireAuth(): void {
   }
 }
 
-function requireAccountId(): string {
+async function ensureAccountId(): Promise<string> {
   const config = getConfig();
-  if (!config.accountId) {
-    error('Account ID not set');
-    console.log(`  Run ${chalk.cyan('zoho-mail auth set-account <accountId>')} to set it`);
+  if (config.accountId) {
+    return config.accountId;
+  }
+
+  try {
+    const accountId = await getAccountId();
+    setConfig({ accountId });
+    return accountId;
+  } catch (err) {
+    error('Could not detect account ID');
+    console.log(`  Run ${chalk.cyan('zoho-mail auth set-account <accountId>')} to set it manually`);
     process.exit(1);
   }
-  return config.accountId;
 }
 
 export function registerLabelsCommands(program: Command): void {
@@ -36,22 +43,23 @@ export function registerLabelsCommands(program: Command): void {
     .option('--json', 'Output as JSON')
     .action(async (options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       const spinner = ora('Fetching labels...').start();
-      
+
       try {
         const labelList = await getLabels(accountId);
         spinner.stop();
-        console.log(formatLabels(labelList, options.json));
+        
+        if (labelList.length === 0) {
+          console.log(chalk.gray('No labels found'));
+        } else {
+          console.log(formatLabels(labelList, options.json));
+        }
       } catch (err) {
         spinner.fail('Failed to fetch labels');
         const message = err instanceof Error ? err.message : String(err);
         error(message);
-        
-        console.log();
-        warn('The Zoho Mail MCP integration via Pipedream has limited API support.');
-        console.log(chalk.gray('Label management requires direct API access.'));
         process.exit(1);
       }
     });
@@ -64,14 +72,14 @@ export function registerLabelsCommands(program: Command): void {
     .option('--json', 'Output as JSON')
     .action(async (name, options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       const spinner = ora(`Creating label "${name}"...`).start();
-      
+
       try {
         const label = await createLabel(accountId, name, options.color);
         spinner.succeed(`Created label: ${label.labelName}`);
-        
+
         if (options.json) {
           console.log(JSON.stringify(label, null, 2));
         } else {
@@ -96,15 +104,14 @@ export function registerLabelsCommands(program: Command): void {
     .option('--color <hex>', 'New label color')
     .action(async (labelId, options) => {
       requireAuth();
-      requireAccountId();
-      
+      await ensureAccountId();
+
       if (!options.name && !options.color) {
         error('Provide at least --name or --color to update');
         process.exit(1);
       }
-      
-      error('Label updating requires direct API access (not yet implemented)');
-      warn('The Zoho Mail MCP integration has limited functionality.');
+
+      error('Label updating not yet implemented');
       process.exit(1);
     });
 
@@ -115,8 +122,8 @@ export function registerLabelsCommands(program: Command): void {
     .option('--force', 'Skip confirmation')
     .action(async (labelId, options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       if (!options.force) {
         warn(`About to delete label: ${labelId}`);
         console.log(chalk.yellow('This will remove the label from all emails.'));
@@ -124,9 +131,9 @@ export function registerLabelsCommands(program: Command): void {
         console.log('Run with --force to confirm.');
         return;
       }
-      
+
       const spinner = ora('Deleting label...').start();
-      
+
       try {
         await deleteLabel(accountId, labelId);
         spinner.succeed('Label deleted');

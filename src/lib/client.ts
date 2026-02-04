@@ -7,134 +7,112 @@ import type {
   ZohoLabel,
   ZohoEmail,
   ZohoEmailContent,
-  ZohoApiResponse,
 } from '../types/zoho.js';
 
 const DEBUG = process.env.ZOHO_DEBUG === '1';
 
-interface ProxyCallResult {
-  success: boolean;
-  data?: unknown;
-  error?: string;
+interface ZohoApiResponse<T> {
+  status: {
+    code: number;
+    description: string;
+  };
+  data: T;
 }
 
 /**
  * Make a proxy call to Zoho Mail API via pdauth
- * pdauth's proxy feature allows direct API calls with the connected credentials
  */
-async function proxyCall(
+async function proxyCall<T>(
   method: string,
   path: string,
-  data?: Record<string, unknown>
-): Promise<ProxyCallResult> {
+  options?: {
+    query?: Record<string, string>;
+    data?: Record<string, unknown>;
+    headers?: Record<string, string>;
+  }
+): Promise<T> {
   const userId = getPdauthUserId();
-  const config = getConfig();
-  const baseUrl = `https://mail.${config.region || 'zoho.com'}`;
-  const url = `${baseUrl}${path}`;
-  
-  if (DEBUG) {
-    console.error(`[DEBUG] ${method} ${url}`);
-    if (data) console.error(`[DEBUG] Body:`, JSON.stringify(data));
+
+  // Build command
+  let cmd = `pdauth proxy zoho_mail "${path}" --user ${userId} -X ${method}`;
+
+  // Add query params
+  if (options?.query) {
+    for (const [key, value] of Object.entries(options.query)) {
+      cmd += ` -q "${key}=${value}"`;
+    }
   }
 
-  // Build the instruction for the MCP tool
-  // Since zoho_mail MCP tools are limited, we'll use a direct HTTP approach
-  // via pdauth's proxy capability
-  
-  // For now, we'll construct curl-like commands that pdauth can proxy
-  // The instruction param tells the MCP tool what to do
-  const instruction = `Make a ${method} request to ${url}${data ? ' with body: ' + JSON.stringify(data) : ''}`;
-  
-  try {
-    // Try using the MCP tool with instruction
-    const args = JSON.stringify({ instruction });
-    const cmd = `pdauth call zoho_mail.zoho_mail-send-email --user ${userId} --args '${args.replace(/'/g, "'\\''")}'`;
-    
-    if (DEBUG) {
-      console.error(`[DEBUG] Command: ${cmd}`);
+  // Add data
+  if (options?.data) {
+    const jsonData = JSON.stringify(options.data).replace(/'/g, "'\\''");
+    cmd += ` -d '${jsonData}'`;
+  }
+
+  // Add headers
+  if (options?.headers) {
+    for (const [key, value] of Object.entries(options.headers)) {
+      cmd += ` -H "${key}: ${value}"`;
     }
-    
+  }
+
+  if (DEBUG) {
+    console.error(`[DEBUG] ${cmd}`);
+  }
+
+  try {
     const result = execSync(cmd, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
       maxBuffer: 10 * 1024 * 1024, // 10MB
     });
-    
-    // Parse the MCP response
-    const lines = result.trim().split('\n');
-    const jsonLine = lines.find(line => line.startsWith('{'));
-    if (jsonLine) {
-      const parsed = JSON.parse(jsonLine);
-      if (parsed.content?.[0]?.text) {
-        return { success: true, data: parsed.content[0].text };
-      }
+
+    // Find the JSON in the output (skip spinner lines)
+    const jsonMatch = result.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      throw new Error('No JSON response from API');
     }
-    
-    return { success: false, error: 'Unexpected response format' };
+
+    const response = JSON.parse(jsonMatch[0]) as ZohoApiResponse<T>;
+
+    if (response.status.code !== 200) {
+      throw new Error(`API error: ${response.status.description}`);
+    }
+
+    return response.data;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { success: false, error: message };
+    if (DEBUG) {
+      console.error(`[DEBUG] Error: ${message}`);
+    }
+    throw new Error(`Zoho API call failed: ${message}`);
   }
 }
-
-/**
- * Execute a direct API call using the stored credentials
- * This is a workaround since the MCP tools are limited
- */
-async function directApiCall(
-  method: string,
-  path: string,
-  data?: Record<string, unknown>
-): Promise<unknown> {
-  const config = getConfig();
-  const baseUrl = `https://mail.${config.region || 'zoho.com'}/api`;
-  const url = `${baseUrl}${path}`;
-  
-  if (DEBUG) {
-    console.error(`[DEBUG] ${method} ${url}`);
-  }
-  
-  // Use pdauth's built-in proxy capability
-  // The zoho_mail app has proxy_enabled: true with base URL mail.zoho.com
-  const userId = getPdauthUserId();
-  
-  // Build curl command that pdauth will proxy
-  let curlCmd = `curl -s -X ${method} "${url}"`;
-  curlCmd += ` -H "Content-Type: application/json"`;
-  
-  if (data && method !== 'GET') {
-    curlCmd += ` -d '${JSON.stringify(data)}'`;
-  }
-  
-  // Unfortunately pdauth doesn't expose raw proxy directly via CLI
-  // The MCP tools only support high-level operations
-  // We need to work within the MCP tool constraints or extend pdauth
-  
-  throw new Error(
-    'Direct API calls not yet supported. The Zoho Mail MCP integration has limited tools.\n' +
-    'To proceed, we need either:\n' +
-    '1. Extended MCP tools from Pipedream\n' +
-    '2. Raw proxy support in pdauth CLI\n' +
-    '3. Direct OAuth token management'
-  );
-}
-
-// High-level API functions that work within MCP limitations
 
 /**
  * Get all mail accounts for the authenticated user
  */
 export async function getAccounts(): Promise<ZohoAccount[]> {
-  // This requires direct API access which MCP doesn't provide
-  // Return a placeholder for now
-  throw new Error('Zoho Mail MCP integration does not support listing accounts. Direct API access needed.');
+  const data = await proxyCall<ZohoAccount[]>('GET', '/api/accounts');
+  return data;
+}
+
+/**
+ * Get account ID (first account)
+ */
+export async function getAccountId(): Promise<string> {
+  const accounts = await getAccounts();
+  if (accounts.length === 0) {
+    throw new Error('No Zoho Mail accounts found');
+  }
+  return accounts[0].accountId;
 }
 
 /**
  * List all folders
  */
 export async function getFolders(accountId: string): Promise<ZohoFolder[]> {
-  throw new Error('Zoho Mail MCP integration does not support listing folders. Direct API access needed.');
+  return proxyCall<ZohoFolder[]>('GET', `/api/accounts/${accountId}/folders`);
 }
 
 /**
@@ -145,21 +123,39 @@ export async function createFolder(
   name: string,
   parentId?: string
 ): Promise<ZohoFolder> {
-  throw new Error('Zoho Mail MCP integration does not support creating folders. Direct API access needed.');
+  const data: Record<string, unknown> = { folderName: name };
+  if (parentId) {
+    data.parentFolderId = parentId;
+  }
+  return proxyCall<ZohoFolder>('POST', `/api/accounts/${accountId}/folders`, { data });
 }
 
 /**
  * Delete a folder
  */
 export async function deleteFolder(accountId: string, folderId: string): Promise<boolean> {
-  throw new Error('Zoho Mail MCP integration does not support deleting folders. Direct API access needed.');
+  await proxyCall<unknown>('DELETE', `/api/accounts/${accountId}/folders/${folderId}`);
+  return true;
+}
+
+/**
+ * Rename a folder
+ */
+export async function renameFolder(
+  accountId: string,
+  folderId: string,
+  newName: string
+): Promise<ZohoFolder> {
+  return proxyCall<ZohoFolder>('PUT', `/api/accounts/${accountId}/folders/${folderId}`, {
+    data: { mode: 'renameFolder', folderName: newName },
+  });
 }
 
 /**
  * List all labels
  */
 export async function getLabels(accountId: string): Promise<ZohoLabel[]> {
-  throw new Error('Zoho Mail MCP integration does not support listing labels. Direct API access needed.');
+  return proxyCall<ZohoLabel[]>('GET', `/api/accounts/${accountId}/labels`);
 }
 
 /**
@@ -170,14 +166,19 @@ export async function createLabel(
   name: string,
   color?: string
 ): Promise<ZohoLabel> {
-  throw new Error('Zoho Mail MCP integration does not support creating labels. Direct API access needed.');
+  const data: Record<string, unknown> = { labelName: name };
+  if (color) {
+    data.color = color;
+  }
+  return proxyCall<ZohoLabel>('POST', `/api/accounts/${accountId}/labels`, { data });
 }
 
 /**
  * Delete a label
  */
 export async function deleteLabel(accountId: string, labelId: string): Promise<boolean> {
-  throw new Error('Zoho Mail MCP integration does not support deleting labels. Direct API access needed.');
+  await proxyCall<unknown>('DELETE', `/api/accounts/${accountId}/labels/${labelId}`);
+  return true;
 }
 
 /**
@@ -193,7 +194,22 @@ export async function getEmails(
     flagged?: boolean;
   }
 ): Promise<ZohoEmail[]> {
-  throw new Error('Zoho Mail MCP integration does not support listing emails. Direct API access needed.');
+  const query: Record<string, string> = {
+    folderId,
+    limit: String(options?.limit || 50),
+  };
+
+  if (options?.start) {
+    query.start = String(options.start);
+  }
+  if (options?.status) {
+    query.status = options.status === 'unread' ? '0' : '1';
+  }
+  if (options?.flagged) {
+    query.flagid = 'flagged';
+  }
+
+  return proxyCall<ZohoEmail[]>('GET', `/api/accounts/${accountId}/messages/view`, { query });
 }
 
 /**
@@ -204,7 +220,10 @@ export async function getEmailContent(
   folderId: string,
   messageId: string
 ): Promise<ZohoEmailContent> {
-  throw new Error('Zoho Mail MCP integration does not support reading emails. Direct API access needed.');
+  return proxyCall<ZohoEmailContent>(
+    'GET',
+    `/api/accounts/${accountId}/folders/${folderId}/messages/${messageId}/content`
+  );
 }
 
 /**
@@ -218,11 +237,22 @@ export async function searchEmails(
     folderId?: string;
   }
 ): Promise<ZohoEmail[]> {
-  throw new Error('Zoho Mail MCP integration does not support searching emails. Direct API access needed.');
+  const params: Record<string, string> = {
+    searchKey: query,
+    limit: String(options?.limit || 50),
+  };
+
+  if (options?.folderId) {
+    params.folderId = options.folderId;
+  }
+
+  return proxyCall<ZohoEmail[]>('GET', `/api/accounts/${accountId}/messages/search`, {
+    query: params,
+  });
 }
 
 /**
- * Send an email - THIS ONE WORKS via MCP!
+ * Send an email
  */
 export async function sendEmail(
   accountId: string,
@@ -235,28 +265,56 @@ export async function sendEmail(
     isHtml?: boolean;
   }
 ): Promise<boolean> {
-  const userId = getPdauthUserId();
-  
-  const instruction = `Send an email to ${options.to} with subject "${options.subject}" and body: ${options.content}`;
-  const args = JSON.stringify({ instruction });
-  
-  try {
-    const cmd = `pdauth call zoho_mail.zoho_mail-send-email --user ${userId} --args '${args.replace(/'/g, "'\\''")}'`;
-    
-    if (DEBUG) {
-      console.error(`[DEBUG] Command: ${cmd}`);
-    }
-    
-    const result = execSync(cmd, {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    
-    // Check for success in response
-    return result.toLowerCase().includes('success') || result.toLowerCase().includes('sent');
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to send email: ${message}`);
+  const data: Record<string, unknown> = {
+    toAddress: options.to,
+    subject: options.subject,
+    content: options.content,
+    mailFormat: options.isHtml ? 'html' : 'plaintext',
+  };
+
+  if (options.cc) data.ccAddress = options.cc;
+  if (options.bcc) data.bccAddress = options.bcc;
+
+  await proxyCall<unknown>('POST', `/api/accounts/${accountId}/messages`, { data });
+  return true;
+}
+
+/**
+ * Update message (move, flag, label, read/unread, archive, spam)
+ */
+export async function updateMessage(
+  accountId: string,
+  messageId: string,
+  action: {
+    mode: 'markAsRead' | 'markAsUnread' | 'moveToFolder' | 'addFlag' | 'removeFlag' |
+          'addTag' | 'removeTag' | 'archive' | 'unarchive' | 'spam' | 'notSpam';
+    folderId?: string;
+    tagId?: string;
   }
+): Promise<boolean> {
+  const data: Record<string, unknown> = {
+    mode: action.mode,
+    messageId: [messageId],
+  };
+
+  if (action.folderId) data.destFolderId = action.folderId;
+  if (action.tagId) data.tagId = action.tagId;
+
+  await proxyCall<unknown>('PUT', `/api/accounts/${accountId}/updatemessage`, { data });
+  return true;
+}
+
+/**
+ * Delete an email
+ */
+export async function deleteEmail(
+  accountId: string,
+  folderId: string,
+  messageId: string
+): Promise<boolean> {
+  await proxyCall<unknown>(
+    'DELETE',
+    `/api/accounts/${accountId}/folders/${folderId}/messages/${messageId}`
+  );
+  return true;
 }

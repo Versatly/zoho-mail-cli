@@ -1,9 +1,18 @@
 import { Command } from 'commander';
 import chalk from 'chalk';
 import ora from 'ora';
-import { getConfig } from '../lib/config.js';
+import { getConfig, setConfig } from '../lib/config.js';
 import { checkZohoConnection } from '../lib/auth.js';
-import { getEmails, getEmailContent, searchEmails, sendEmail } from '../lib/client.js';
+import {
+  getEmails,
+  getEmailContent,
+  searchEmails,
+  sendEmail,
+  updateMessage,
+  deleteEmail,
+  getAccountId,
+  getFolders,
+} from '../lib/client.js';
 import { formatEmails, formatEmailContent, success, error, warn } from '../lib/output.js';
 
 function requireAuth(): void {
@@ -15,14 +24,29 @@ function requireAuth(): void {
   }
 }
 
-function requireAccountId(): string {
+async function ensureAccountId(): Promise<string> {
   const config = getConfig();
-  if (!config.accountId) {
-    error('Account ID not set');
-    console.log(`  Run ${chalk.cyan('zoho-mail auth set-account <accountId>')} to set it`);
+  if (config.accountId) {
+    return config.accountId;
+  }
+
+  try {
+    const accountId = await getAccountId();
+    setConfig({ accountId });
+    return accountId;
+  } catch (err) {
+    error('Could not detect account ID');
     process.exit(1);
   }
-  return config.accountId;
+}
+
+async function getInboxFolderId(accountId: string): Promise<string> {
+  const folders = await getFolders(accountId);
+  const inbox = folders.find(f => f.folderType === 'Inbox');
+  if (!inbox) {
+    throw new Error('Inbox folder not found');
+  }
+  return inbox.folderId;
 }
 
 export function registerMailCommands(program: Command): void {
@@ -34,7 +58,7 @@ export function registerMailCommands(program: Command): void {
     .command('list')
     .description('List emails in a folder')
     .argument('[folderId]', 'Folder ID (default: Inbox)')
-    .option('-n, --limit <number>', 'Max emails to fetch', '50')
+    .option('-n, --limit <number>', 'Max emails to fetch', '20')
     .option('--unread', 'Only unread emails')
     .option('--flagged', 'Only flagged emails')
     .option('--from <email>', 'Filter by sender')
@@ -42,24 +66,26 @@ export function registerMailCommands(program: Command): void {
     .option('--json', 'Output as JSON')
     .action(async (folderId, options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
-      const targetFolder = folderId || 'Inbox';
-      const spinner = ora(`Fetching emails from ${targetFolder}...`).start();
-      
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Fetching emails...').start();
+
       try {
-        const emails = await getEmails(accountId, targetFolder, {
+        // Get Inbox folder ID if not specified
+        const targetFolderId = folderId || await getInboxFolderId(accountId);
+
+        const emails = await getEmails(accountId, targetFolderId, {
           limit: parseInt(options.limit, 10),
           status: options.unread ? 'unread' : undefined,
           flagged: options.flagged,
         });
-        
+
         spinner.stop();
-        
+
         // Apply client-side filters if needed
         let filtered = emails;
         if (options.from) {
-          filtered = filtered.filter(e => 
+          filtered = filtered.filter(e =>
             e.fromAddress.toLowerCase().includes(options.from.toLowerCase())
           );
         }
@@ -68,7 +94,7 @@ export function registerMailCommands(program: Command): void {
             e.subject.toLowerCase().includes(options.subject.toLowerCase())
           );
         }
-        
+
         if (filtered.length === 0) {
           console.log(chalk.gray('No emails found'));
         } else {
@@ -80,10 +106,6 @@ export function registerMailCommands(program: Command): void {
         spinner.fail('Failed to fetch emails');
         const message = err instanceof Error ? err.message : String(err);
         error(message);
-        
-        console.log();
-        warn('The Zoho Mail MCP integration via Pipedream has limited API support.');
-        console.log(chalk.gray('Email listing requires direct API access.'));
         process.exit(1);
       }
     });
@@ -98,15 +120,15 @@ export function registerMailCommands(program: Command): void {
     .option('--json', 'Output as JSON')
     .action(async (messageId, options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
-      const folderId = options.folder || 'Inbox';
+      const accountId = await ensureAccountId();
+
       const spinner = ora('Fetching email content...').start();
-      
+
       try {
+        const folderId = options.folder || await getInboxFolderId(accountId);
         const email = await getEmailContent(accountId, folderId, messageId);
         spinner.stop();
-        
+
         if (options.json) {
           console.log(JSON.stringify(email, null, 2));
         } else {
@@ -129,18 +151,18 @@ export function registerMailCommands(program: Command): void {
     .option('--json', 'Output as JSON')
     .action(async (query, options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       const spinner = ora(`Searching for "${query}"...`).start();
-      
+
       try {
         const emails = await searchEmails(accountId, query, {
           limit: parseInt(options.limit, 10),
           folderId: options.folder,
         });
-        
+
         spinner.stop();
-        
+
         if (emails.length === 0) {
           console.log(chalk.gray('No emails found'));
         } else {
@@ -168,8 +190,8 @@ export function registerMailCommands(program: Command): void {
     .option('--attach <file>', 'Attachment path')
     .action(async (options) => {
       requireAuth();
-      const accountId = requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       // Validate required fields
       if (!options.to) {
         error('--to is required');
@@ -188,9 +210,9 @@ export function registerMailCommands(program: Command): void {
         error('Attachments not yet supported');
         process.exit(1);
       }
-      
+
       const spinner = ora(`Sending email to ${options.to}...`).start();
-      
+
       try {
         await sendEmail(accountId, {
           to: options.to,
@@ -200,7 +222,7 @@ export function registerMailCommands(program: Command): void {
           content: options.body,
           isHtml: options.html,
         });
-        
+
         spinner.succeed('Email sent!');
       } catch (err) {
         spinner.fail('Failed to send email');
@@ -217,11 +239,22 @@ export function registerMailCommands(program: Command): void {
     .argument('<folderId>', 'Target folder ID')
     .action(async (messageId, folderId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Email moving requires direct API access (not yet implemented)');
-      warn('The Zoho Mail MCP integration has limited functionality.');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Moving email...').start();
+
+      try {
+        await updateMessage(accountId, messageId, {
+          mode: 'moveToFolder',
+          folderId,
+        });
+        spinner.succeed('Email moved');
+      } catch (err) {
+        spinner.fail('Failed to move email');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -232,16 +265,26 @@ export function registerMailCommands(program: Command): void {
     .option('--force', 'Skip confirmation')
     .action(async (messageId, options) => {
       requireAuth();
-      requireAccountId();
-      
+      const accountId = await ensureAccountId();
+
       if (!options.force) {
         warn(`About to delete email: ${messageId}`);
         console.log('Run with --force to confirm.');
         return;
       }
-      
-      error('Email deletion requires direct API access (not yet implemented)');
-      process.exit(1);
+
+      const spinner = ora('Deleting email...').start();
+
+      try {
+        const folderId = options.folder || await getInboxFolderId(accountId);
+        await deleteEmail(accountId, folderId, messageId);
+        spinner.succeed('Email deleted');
+      } catch (err) {
+        spinner.fail('Failed to delete email');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -250,10 +293,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Flagging requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Flagging email...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'addFlag' });
+        spinner.succeed('Email flagged');
+      } catch (err) {
+        spinner.fail('Failed to flag email');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -262,10 +314,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Unflagging requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Removing flag...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'removeFlag' });
+        spinner.succeed('Flag removed');
+      } catch (err) {
+        spinner.fail('Failed to remove flag');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -274,10 +335,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Archiving requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Archiving email...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'archive' });
+        spinner.succeed('Email archived');
+      } catch (err) {
+        spinner.fail('Failed to archive email');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -286,10 +356,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Marking as spam requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Marking as spam...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'spam' });
+        spinner.succeed('Marked as spam');
+      } catch (err) {
+        spinner.fail('Failed to mark as spam');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -298,10 +377,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Unmarking spam requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Unmarking spam...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'notSpam' });
+        spinner.succeed('Unmarked as spam');
+      } catch (err) {
+        spinner.fail('Failed to unmark spam');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -310,10 +398,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Mark as read requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Marking as read...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'markAsRead' });
+        spinner.succeed('Marked as read');
+      } catch (err) {
+        spinner.fail('Failed to mark as read');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -322,10 +419,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<messageId>', 'Message ID')
     .action(async (messageId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Mark as unread requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Marking as unread...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'markAsUnread' });
+        spinner.succeed('Marked as unread');
+      } catch (err) {
+        spinner.fail('Failed to mark as unread');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -335,10 +441,19 @@ export function registerMailCommands(program: Command): void {
     .argument('<labelId>', 'Label ID')
     .action(async (messageId, labelId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Labeling requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Applying label...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'addTag', tagId: labelId });
+        spinner.succeed('Label applied');
+      } catch (err) {
+        spinner.fail('Failed to apply label');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 
   mail
@@ -348,9 +463,18 @@ export function registerMailCommands(program: Command): void {
     .argument('<labelId>', 'Label ID')
     .action(async (messageId, labelId) => {
       requireAuth();
-      requireAccountId();
-      
-      error('Unlabeling requires direct API access (not yet implemented)');
-      process.exit(1);
+      const accountId = await ensureAccountId();
+
+      const spinner = ora('Removing label...').start();
+
+      try {
+        await updateMessage(accountId, messageId, { mode: 'removeTag', tagId: labelId });
+        spinner.succeed('Label removed');
+      } catch (err) {
+        spinner.fail('Failed to remove label');
+        const message = err instanceof Error ? err.message : String(err);
+        error(message);
+        process.exit(1);
+      }
     });
 }

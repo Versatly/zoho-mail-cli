@@ -30,20 +30,17 @@ program.hook('preAction', (thisCommand) => {
   }
 });
 
-// Add a note about the current limitations
+// Add help text
 program.addHelpText('after', `
 
-${chalk.yellow('⚠️  Current Limitation:')}
-  The Zoho Mail MCP integration via Pipedream has limited functionality.
-  Only sending emails works via the MCP tools. Other operations require
-  direct API access which is not yet implemented.
+${chalk.cyan('Examples:')}
+  zoho-mail mail list              List inbox emails
+  zoho-mail mail list --unread     List unread emails
+  zoho-mail mail search "invoice"  Search for emails
+  zoho-mail folders list           List all folders
+  zoho-mail labels list            List all labels
 
-  To fully enable this CLI, we need either:
-  1. Extended MCP tools from Pipedream (zoho_mail integration)
-  2. Direct OAuth token extraction from pdauth
-  3. IMAP/SMTP configuration (himalaya skill)
-
-${chalk.gray('For updates: https://github.com/Versatly/zoho-mail-cli')}
+${chalk.gray('For more info: https://github.com/Versatly/zoho-mail-cli')}
 `);
 
 program.parse();

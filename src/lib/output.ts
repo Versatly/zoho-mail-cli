@@ -118,7 +118,11 @@ export function formatEmails(emails: ZohoEmail[], json: boolean = false): string
   });
 
   for (const email of emails) {
-    const date = new Date(email.receivedTime).toLocaleString();
+    // receivedTime can be a string (milliseconds) or number
+    const timestamp = typeof email.receivedTime === 'string' 
+      ? parseInt(email.receivedTime, 10) 
+      : email.receivedTime;
+    const date = new Date(timestamp).toLocaleString();
     const status = getEmailStatusIcon(email);
     const subject = email.subject || '(no subject)';
     
@@ -136,13 +140,16 @@ export function formatEmails(emails: ZohoEmail[], json: boolean = false): string
 
 function getEmailStatusIcon(email: ZohoEmail): string {
   let icons = '';
-  if (email.status === 'unread' || email.status2 === 'unread') {
+  // status '0' = unread, '1' = read
+  if (email.status === '0' || email.status2 === '0') {
     icons += '●';
   }
-  if (email.flagid && email.flagid !== '0') {
+  if (email.flagid && email.flagid !== 'flag_not_set' && email.flagid !== '0') {
     icons += '⭐';
   }
-  if (email.hasAttachment) {
+  // hasAttachment can be boolean, string "0"/"1", or "true"/"false"
+  const hasAtt = email.hasAttachment;
+  if (hasAtt === true || hasAtt === '1' || hasAtt === 'true') {
     icons += '📎';
   }
   return icons || '-';
