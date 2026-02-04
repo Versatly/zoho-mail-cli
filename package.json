@@ -1,6 +1,6 @@
 {
   "name": "@versatly/zoho-mail-cli",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Powerful CLI for Zoho Mail - inbox management, folders, labels, and email operations",
   "type": "module",
   "main": "dist/index.js",
